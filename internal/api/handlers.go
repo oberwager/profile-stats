@@ -701,6 +701,7 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 		servicesDown    int
 	)
 
+	slog.Info("uptime kuma uptime keys", "keys", heartbeat.UptimeList)
 	for _, mon := range monitors {
 		idStr := strconv.Itoa(mon.ID)
 		uptime24h := heartbeat.UptimeList[idStr+"_24"]

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 )
 
@@ -278,7 +277,7 @@ func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag, token
 		return "", 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json")
+	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -312,37 +311,54 @@ func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag, token
 	return resp.Header.Get("Docker-Content-Digest"), total, nil
 }
 
-// IsCosignSigned checks whether a cosign signature artifact exists in GHCR for
-// the given image digest. It confirms the presence of the .sig OCI artifact that
-// cosign pushes during keyless signing; it does not re-verify the cryptographic
-// signature or the Fulcio certificate chain.
+// IsCosignSigned checks whether a cosign v2 signature exists for the given image
+// digest via the OCI Referrers API. It looks for a referrer with artifactType
+// "application/vnd.dev.cosign.artifact.sig.v1+json" and does not re-verify the
+// cryptographic signature or Fulcio certificate chain.
 func (c *GitHubClient) IsCosignSigned(ctx context.Context, repo, digest string) (bool, error) {
 	if err := validateRepoName(repo); err != nil {
 		return false, fmt.Errorf("cosign check: %w", err)
-	}
-	// Cosign stores keyless signatures as OCI artifacts tagged sha256-<hex>.sig
-	sigTag := strings.Replace(digest, ":", "-", 1) + ".sig"
-	u, err := safeURL("https://ghcr.io", "v2", c.owner, repo, "manifests", sigTag)
-	if err != nil {
-		return false, fmt.Errorf("cosign check URL: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, u, nil)
-	if err != nil {
-		return false, fmt.Errorf("cosign check request: %w", err)
 	}
 	token, err := c.ghcrToken(ctx, repo)
 	if err != nil {
 		return false, fmt.Errorf("cosign check: %w", err)
 	}
+
+	u := fmt.Sprintf("https://ghcr.io/v2/%s/%s/referrers/%s", c.owner, repo, digest)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return false, fmt.Errorf("cosign check request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
+	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("cosign check fetch: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 
-	return resp.StatusCode == http.StatusOK, nil
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return false, fmt.Errorf("cosign check read: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+
+	var index struct {
+		Manifests []struct {
+			ArtifactType string `json:"artifactType"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(body, &index); err != nil {
+		return false, fmt.Errorf("cosign check parse: %w", err)
+	}
+
+	for _, m := range index.Manifests {
+		if m.ArtifactType == "application/vnd.dev.cosign.artifact.sig.v1+json" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
