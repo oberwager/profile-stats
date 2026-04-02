@@ -18,22 +18,21 @@ type LastWorkedOn struct {
 }
 
 type ClusterResponse struct {
-	CPUUsagePct                float64      `json:"cpu_usage_pct"`
-	MemUsedBytes               int64        `json:"mem_used_bytes"`
-	MemTotalBytes              int64        `json:"mem_total_bytes"`
-	DiskUsedPct                float64      `json:"disk_used_pct"`
-	Load1                      float64      `json:"load1"`
-	NodeUptimeDisplay          string       `json:"node_uptime_display"`
-	PodsRunning                int          `json:"pods_running"`
-	PodsUnhealthy              int          `json:"pods_unhealthy"`
-	NamespaceCount             int          `json:"namespace_count"`
-	RestartCount24h            int          `json:"restart_count_24h"`
-	CertsHealthy               int          `json:"certs_healthy"`
-	MinCertExpiryDays          int          `json:"min_cert_expiry_days"`
-	ActiveAlerts               AlertSummary `json:"active_alerts"`
-	PrometheusScrapeLagSeconds float64      `json:"prometheus_scrape_lag_seconds"`
-	TargetsUp                  int          `json:"targets_up"`
-	TargetsDown                int          `json:"targets_down"`
+	CPUUsagePct       float64      `json:"cpu_usage_pct"`
+	MemUsedBytes      int64        `json:"mem_used_bytes"`
+	MemTotalBytes     int64        `json:"mem_total_bytes"`
+	DiskUsedPct       float64      `json:"disk_used_pct"`
+	Load1             float64      `json:"load1"`
+	NodeUptimeDisplay string       `json:"node_uptime_display"`
+	PodsRunning       int          `json:"pods_running"`
+	PodsUnhealthy     int          `json:"pods_unhealthy"`
+	NamespaceCount    int          `json:"namespace_count"`
+	RestartCount24h   int          `json:"restart_count_24h"`
+	CertsHealthy      int          `json:"certs_healthy"`
+	MinCertExpiryDays int          `json:"min_cert_expiry_days"`
+	ActiveAlerts      AlertSummary `json:"active_alerts"`
+	TargetsUp         int          `json:"targets_up"`
+	TargetsDown       int          `json:"targets_down"`
 }
 
 type AlertSummary struct {
@@ -72,6 +71,7 @@ type ServiceStatus struct {
 	Name      string  `json:"name"`
 	Uptime24h float64 `json:"uptime_24h"`
 	Up        bool    `json:"up"`
+	AvgPingMs int     `json:"avg_ping_ms"`
 }
 
 type HealthResponse struct {

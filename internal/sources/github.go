@@ -435,7 +435,7 @@ func (c *GitHubClient) LastPush(ctx context.Context) (LastPushInfo, error) {
 	if err != nil {
 		return LastPushInfo{}, fmt.Errorf("last push URL: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u+"?per_page=5", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u+"?per_page=30", nil)
 	if err != nil {
 		return LastPushInfo{}, fmt.Errorf("last push request: %w", err)
 	}
@@ -448,6 +448,10 @@ func (c *GitHubClient) LastPush(ctx context.Context) (LastPushInfo, error) {
 		return LastPushInfo{}, fmt.Errorf("last push fetch: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return LastPushInfo{}, fmt.Errorf("last push status %d", resp.StatusCode)
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {

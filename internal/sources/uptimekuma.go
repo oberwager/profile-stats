@@ -55,7 +55,7 @@ type statusPageResponse struct {
 }
 
 type heartbeatResponse struct {
-	UptimeList    map[string]float64       `json:"uptimeList"`
+	UptimeList    map[string]float64        `json:"uptimeList"`
 	HeartbeatList map[string][]heartbeatRaw `json:"heartbeatList"`
 }
 

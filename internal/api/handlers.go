@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -260,7 +261,6 @@ func (s *Server) fetchCluster(ctx context.Context) ClusterResponse {
 		minCertExpiry   float64
 		targetsUp       float64
 		targetsDown     float64
-		scrapeLag       float64
 		alertSummaryRaw sources.AlertSummary
 	)
 
@@ -393,15 +393,6 @@ func (s *Server) fetchCluster(ctx context.Context) ClusterResponse {
 		return nil
 	})
 	eg.Go(func() error {
-		v, err := s.prometheus.PrometheusScrapeLag(egCtx)
-		if err != nil {
-			slog.Warn("prometheus scrape lag", "error", err)
-			return nil
-		}
-		scrapeLag = v
-		return nil
-	})
-	eg.Go(func() error {
 		summary, err := s.alertmanager.ActiveAlerts(egCtx)
 		if err != nil {
 			slog.Warn("alertmanager active alerts", "error", err)
@@ -419,22 +410,21 @@ func (s *Server) fetchCluster(ctx context.Context) ClusterResponse {
 	s.setUpstreamHealth("prometheus", cpuUsage != 0 || memTotal != 0)
 
 	return ClusterResponse{
-		CPUUsagePct:                cpuUsage,
-		MemUsedBytes:               int64(memUsed),
-		MemTotalBytes:              int64(memTotal),
-		DiskUsedPct:                diskUsed,
-		Load1:                      load1,
-		NodeUptimeDisplay:          formatUptime(uptimeSecs),
-		PodsRunning:                int(podsRunning),
-		PodsUnhealthy:              int(podsUnhealthy),
-		NamespaceCount:             int(nsCount),
-		RestartCount24h:            int(restarts),
-		CertsHealthy:               int(certsHealthy),
-		MinCertExpiryDays:          int(minCertExpiry),
-		ActiveAlerts:               AlertSummary{Critical: alertSummaryRaw.Critical, Warning: alertSummaryRaw.Warning, Total: alertSummaryRaw.Total},
-		PrometheusScrapeLagSeconds: scrapeLag,
-		TargetsUp:                  int(targetsUp),
-		TargetsDown:                int(targetsDown),
+		CPUUsagePct:       math.Round(cpuUsage*100) / 100,
+		MemUsedBytes:      int64(memUsed),
+		MemTotalBytes:     int64(memTotal),
+		DiskUsedPct:       math.Round(diskUsed*100) / 100,
+		Load1:             math.Round(load1*100) / 100,
+		NodeUptimeDisplay: formatUptime(uptimeSecs),
+		PodsRunning:       int(podsRunning),
+		PodsUnhealthy:     int(podsUnhealthy),
+		NamespaceCount:    int(nsCount),
+		RestartCount24h:   int(restarts),
+		CertsHealthy:      int(certsHealthy),
+		MinCertExpiryDays: int(minCertExpiry),
+		ActiveAlerts:      AlertSummary{Critical: alertSummaryRaw.Critical, Warning: alertSummaryRaw.Warning, Total: alertSummaryRaw.Total},
+		TargetsUp:         int(targetsUp),
+		TargetsDown:       int(targetsDown),
 	}
 }
 
@@ -664,7 +654,7 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 
 	var successRatePct float64
 	if totalCompleted > 0 {
-		successRatePct = float64(totalSuccessful) / float64(totalCompleted) * 100
+		successRatePct = math.Round(float64(totalSuccessful)/float64(totalCompleted)*10000) / 100
 	}
 
 	s.setUpstreamHealth("github", len(allWorkflowRuns(runsMap)) > 0)
@@ -769,10 +759,30 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 
 		up := uptime24h > 0.95
 
+		var avgPingMs int
+		entries := heartbeat.HeartbeatList[idStr]
+		if len(entries) > 0 {
+			start := len(entries) - 10
+			if start < 0 {
+				start = 0
+			}
+			var pingSum, pingCount int
+			for _, e := range entries[start:] {
+				if e.Ping > 0 {
+					pingSum += e.Ping
+					pingCount++
+				}
+			}
+			if pingCount > 0 {
+				avgPingMs = pingSum / pingCount
+			}
+		}
+
 		ss := ServiceStatus{
 			Name:      mon.Name,
 			Uptime24h: uptime24h,
 			Up:        up,
+			AvgPingMs: avgPingMs,
 		}
 		serviceStatuses = append(serviceStatuses, ss)
 		totalUptime90d += uptime90d

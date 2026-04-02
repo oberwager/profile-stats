@@ -11,7 +11,6 @@ import (
 	"time"
 )
 
-
 type PrometheusClient struct {
 	baseURL    string
 	httpClient *http.Client
@@ -168,8 +167,4 @@ func (c *PrometheusClient) TargetsUp(ctx context.Context) (float64, error) {
 
 func (c *PrometheusClient) TargetsDown(ctx context.Context) (float64, error) {
 	return c.Query(ctx, `count(up == 0) or vector(0)`)
-}
-
-func (c *PrometheusClient) PrometheusScrapeLag(ctx context.Context) (float64, error) {
-	return c.Query(ctx, `max(prometheus_target_interval_length_seconds{quantile="0.99"})`)
 }
