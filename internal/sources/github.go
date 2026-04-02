@@ -167,17 +167,40 @@ func (c *GitHubClient) ImageManifest(ctx context.Context, repo string) (digest s
 	}
 
 	var manifest struct {
-		SchemaVersion int    `json:"schemaVersion"`
-		MediaType     string `json:"mediaType"`
-		Config        struct {
+		MediaType string `json:"mediaType"`
+		Config    struct {
 			Size int64 `json:"size"`
 		} `json:"config"`
 		Layers []struct {
 			Size int64 `json:"size"`
 		} `json:"layers"`
+		// Image index fields
+		Manifests []struct {
+			Digest   string `json:"digest"`
+			Platform struct {
+				OS   string `json:"os"`
+				Arch string `json:"architecture"`
+			} `json:"platform"`
+		} `json:"manifests"`
 	}
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return digest, 0, fmt.Errorf("ghcr manifest parse: %w", err)
+	}
+
+	// If this is a multi-arch index, follow the linux/amd64 platform manifest.
+	if len(manifest.Manifests) > 0 {
+		var platformDigest string
+		for _, m := range manifest.Manifests {
+			if m.Platform.OS == "linux" && m.Platform.Arch == "amd64" {
+				platformDigest = m.Digest
+				break
+			}
+		}
+		if platformDigest == "" {
+			platformDigest = manifest.Manifests[0].Digest
+		}
+		_, size, err := c.fetchManifestDigest(ctx, repo, platformDigest, token)
+		return digest, size, err
 	}
 
 	var total int64
@@ -255,16 +278,38 @@ func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag, token
 		return "", 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return "", 0, err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
 
-	return resp.Header.Get("Docker-Content-Digest"), 0, nil
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return "", 0, err
+	}
+
+	var m struct {
+		Config struct {
+			Size int64 `json:"size"`
+		} `json:"config"`
+		Layers []struct {
+			Size int64 `json:"size"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return resp.Header.Get("Docker-Content-Digest"), 0, nil
+	}
+
+	var total int64
+	total += m.Config.Size
+	for _, l := range m.Layers {
+		total += l.Size
+	}
+
+	return resp.Header.Get("Docker-Content-Digest"), total, nil
 }
 
 // IsCosignSigned checks whether a cosign signature artifact exists in GHCR for
