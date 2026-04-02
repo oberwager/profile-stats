@@ -695,7 +695,7 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 
 	var (
 		serviceStatuses []ServiceStatus
-		totalUptime90d  float64
+		totalUptime30d  float64
 		totalUptime24h  float64
 		servicesUp      int
 		servicesDown    int
@@ -704,7 +704,7 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 	for _, mon := range monitors {
 		idStr := strconv.Itoa(mon.ID)
 		uptime24h := heartbeat.UptimeList[idStr+"_24"]
-		uptime90d := heartbeat.UptimeList[idStr+"_90"]
+		uptime30d := heartbeat.UptimeList[idStr+"_720"]
 
 		up := uptime24h > 0.95
 
@@ -741,14 +741,14 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 			Name:          mon.Name,
 			MonitorID:     mon.ID,
 			Uptime24h:     uptime24h,
-			Uptime90d:     uptime90d,
+			Uptime30d:     uptime30d,
 			Up:            up,
 			LastStatus:    lastStatus,
 			LastCheckedAt: lastCheckedAt,
 			AvgPingMs:     avgPingMs,
 		}
 		serviceStatuses = append(serviceStatuses, ss)
-		totalUptime90d += uptime90d
+		totalUptime30d += uptime30d
 		totalUptime24h += uptime24h
 		if up {
 			servicesUp++
@@ -757,9 +757,9 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 		}
 	}
 
-	var uptime90DayPct, uptime24HourPct float64
+	var uptime30DayPct, uptime24HourPct float64
 	if len(serviceStatuses) > 0 {
-		uptime90DayPct = (totalUptime90d / float64(len(serviceStatuses))) * 100
+		uptime30DayPct = (totalUptime30d / float64(len(serviceStatuses))) * 100
 		uptime24HourPct = (totalUptime24h / float64(len(serviceStatuses))) * 100
 	}
 
@@ -768,7 +768,7 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 	}
 
 	return ServicesResponse{
-		Uptime90DayPct:  uptime90DayPct,
+		Uptime30DayPct:  uptime30DayPct,
 		Uptime24HourPct: uptime24HourPct,
 		ServicesUp:      servicesUp,
 		ServicesDown:    servicesDown,

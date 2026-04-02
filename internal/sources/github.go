@@ -98,9 +98,45 @@ func (c *GitHubClient) WorkflowRuns(ctx context.Context, repo string) ([]Workflo
 	return runs, nil
 }
 
+// ghcrToken exchanges the PAT for a short-lived registry JWT scoped to a single repo.
+func (c *GitHubClient) ghcrToken(ctx context.Context, repo string) (string, error) {
+	u := fmt.Sprintf("https://ghcr.io/token?service=ghcr.io&scope=repository:%s/%s:pull", c.owner, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", fmt.Errorf("ghcr token request: %w", err)
+	}
+	req.SetBasicAuth(c.owner, c.pat)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ghcr token fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return "", fmt.Errorf("ghcr token read: %w", err)
+	}
+
+	var result struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("ghcr token parse: %w", err)
+	}
+	if result.Token == "" {
+		return "", fmt.Errorf("ghcr token: empty response")
+	}
+	return result.Token, nil
+}
+
 // ImageManifest fetches the OCI manifest for the :latest tag of a ghcr.io image.
 func (c *GitHubClient) ImageManifest(ctx context.Context, repo string) (digest string, sizeBytes int64, err error) {
 	if err := validateRepoName(repo); err != nil {
+		return "", 0, fmt.Errorf("ghcr manifest: %w", err)
+	}
+	token, err := c.ghcrToken(ctx, repo)
+	if err != nil {
 		return "", 0, fmt.Errorf("ghcr manifest: %w", err)
 	}
 	u, err := safeURL("https://ghcr.io", "v2", c.owner, repo, "manifests/latest")
@@ -111,7 +147,7 @@ func (c *GitHubClient) ImageManifest(ctx context.Context, repo string) (digest s
 	if err != nil {
 		return "", 0, fmt.Errorf("ghcr manifest request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json")
 
 	resp, err := c.httpClient.Do(req)
@@ -160,6 +196,10 @@ func (c *GitHubClient) CurrentVersion(ctx context.Context, repo, latestDigest st
 	if err := validateRepoName(repo); err != nil {
 		return "", fmt.Errorf("ghcr tags: %w", err)
 	}
+	token, err := c.ghcrToken(ctx, repo)
+	if err != nil {
+		return "", fmt.Errorf("ghcr tags: %w", err)
+	}
 	tagsURL, err := safeURL("https://ghcr.io", "v2", c.owner, repo, "tags/list")
 	if err != nil {
 		return "", fmt.Errorf("ghcr tags URL: %w", err)
@@ -168,7 +208,7 @@ func (c *GitHubClient) CurrentVersion(ctx context.Context, repo, latestDigest st
 	if err != nil {
 		return "", fmt.Errorf("ghcr tags request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -193,7 +233,7 @@ func (c *GitHubClient) CurrentVersion(ctx context.Context, repo, latestDigest st
 		if !semverRe.MatchString(tag) {
 			continue
 		}
-		tagDigest, _, err := c.fetchManifestDigest(ctx, repo, tag)
+		tagDigest, _, err := c.fetchManifestDigest(ctx, repo, tag, token)
 		if err != nil {
 			continue
 		}
@@ -205,7 +245,7 @@ func (c *GitHubClient) CurrentVersion(ctx context.Context, repo, latestDigest st
 	return "", nil
 }
 
-func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag string) (string, int64, error) {
+func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag, token string) (string, int64, error) {
 	u, err := safeURL("https://ghcr.io", "v2", c.owner, repo, "manifests", tag)
 	if err != nil {
 		return "", 0, fmt.Errorf("ghcr manifest digest URL: %w", err)
@@ -214,7 +254,7 @@ func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag string
 	if err != nil {
 		return "", 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
 
 	resp, err := c.httpClient.Do(req)
@@ -245,7 +285,11 @@ func (c *GitHubClient) IsCosignSigned(ctx context.Context, repo, digest string) 
 	if err != nil {
 		return false, fmt.Errorf("cosign check request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.pat)
+	token, err := c.ghcrToken(ctx, repo)
+	if err != nil {
+		return false, fmt.Errorf("cosign check: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.oci.image.manifest.v1+json")
 
 	resp, err := c.httpClient.Do(req)
