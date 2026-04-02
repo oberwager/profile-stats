@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: profile-stats
+  namespace: profile-stats
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: profile-stats
+  template:
+    metadata:
+      labels:
+        app: profile-stats
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: profile-stats
+          image: ghcr.io/oberwager/profile-stats:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  name: profile-stats-secrets
+                  key: GITHUB_PAT
+            - name: UPTIME_KUMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: profile-stats-secrets
+                  key: UPTIME_KUMA_API_KEY
+                  optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
