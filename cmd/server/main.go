@@ -29,7 +29,7 @@ func loadConfig() Config {
 		AllowedOrigin:   getEnv("ALLOWED_ORIGIN", "https://lucas.tools"),
 		PrometheusURL:   getEnv("PROMETHEUS_URL", "http://prometheus.monitoring.svc:9090"),
 		AlertmanagerURL: getEnv("ALERTMANAGER_URL", "http://alertmanager.monitoring.svc:9093"),
-		UptimeKumaURL:   getEnv("UPTIME_KUMA_URL", "http://uptime-kuma.monitoring.svc:3001"),
+		UptimeKumaURL:   getEnv("UPTIME_KUMA_URL", "http://kuma-service.kuma.svc:3001"),
 		UptimeKumaKey:   os.Getenv("UPTIME_KUMA_API_KEY"),
 		GitHubPAT:       os.Getenv("GITHUB_PAT"),
 		GitHubOwner:     getEnv("GITHUB_OWNER", "oberwager"),

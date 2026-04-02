@@ -1,6 +1,7 @@
 package sources
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -124,6 +125,9 @@ func (c *GitHubClient) ImageManifest(ctx context.Context, repo string) (digest s
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return digest, 0, fmt.Errorf("ghcr manifest read: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return digest, 0, fmt.Errorf("ghcr manifest: HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
 
 	var manifest struct {

@@ -143,11 +143,11 @@ func (c *PrometheusClient) PodsRunning(ctx context.Context) (float64, error) {
 }
 
 func (c *PrometheusClient) PodsUnhealthy(ctx context.Context) (float64, error) {
-	return c.Query(ctx, `count(kube_pod_status_phase{phase=~"Pending|Failed|Unknown"}) or vector(0)`)
+	return c.Query(ctx, `count(kube_pod_status_phase{phase=~"Pending|Failed|Unknown"} == 1) or vector(0)`)
 }
 
 func (c *PrometheusClient) NamespaceCount(ctx context.Context) (float64, error) {
-	return c.Query(ctx, `count(kube_namespace_labels)`)
+	return c.Query(ctx, `count(kube_namespace_status_phase{phase="Active"}) or vector(0)`)
 }
 
 func (c *PrometheusClient) RestartCount24h(ctx context.Context) (float64, error) {
@@ -171,5 +171,5 @@ func (c *PrometheusClient) TargetsDown(ctx context.Context) (float64, error) {
 }
 
 func (c *PrometheusClient) PrometheusScrapeLag(ctx context.Context) (float64, error) {
-	return c.Query(ctx, `time() - min(prometheus_target_interval_length_seconds)`)
+	return c.Query(ctx, `max(prometheus_target_interval_length_seconds{quantile="0.99"})`)
 }
