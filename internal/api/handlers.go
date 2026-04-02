@@ -204,16 +204,21 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(servicesData, &services)
 	}
 
+	repoURL := fmt.Sprintf("https://github.com/%s/%s", s.owner, lastPush.Repo)
+	if lastPush.Repo != "" {
+		if hp, err := s.github.RepoHomepage(ctx, lastPush.Repo); err == nil && hp != "" {
+			repoURL = hp
+		}
+	}
+
 	stats := StatsResponse{
 		CachedAt: time.Now(),
 		Cluster:  cluster,
 		Pipeline: pipeline,
 		Services: services,
 		LastWorkedOn: LastWorkedOn{
-			Repo:        lastPush.Repo,
-			RepoURL:     fmt.Sprintf("https://github.com/%s/%s", s.owner, lastPush.Repo),
-			Message:     lastPush.Message,
-			CommittedAt: lastPush.CommittedAt,
+			Repo:    lastPush.Repo,
+			RepoURL: repoURL,
 		},
 	}
 

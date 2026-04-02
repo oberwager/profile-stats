@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,11 +27,28 @@ type GitHubClient struct {
 }
 
 func NewGitHubClient(pat, owner string) *GitHubClient {
-	return &GitHubClient{
+	c := &GitHubClient{
 		pat:        pat,
 		owner:      owner,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		tokenCache: make(map[string]cachedToken),
+	}
+	go c.tokenCacheCleanupLoop()
+	return c
+}
+
+func (c *GitHubClient) tokenCacheCleanupLoop() {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for range t.C {
+		now := time.Now()
+		c.tokenMu.Lock()
+		for repo, cached := range c.tokenCache {
+			if now.After(cached.expiry) {
+				delete(c.tokenCache, repo)
+			}
+		}
+		c.tokenMu.Unlock()
 	}
 }
 
@@ -422,14 +440,12 @@ func (c *GitHubClient) RepoHomepage(ctx context.Context, repo string) (string, e
 	return result.Homepage, nil
 }
 
-// LastPushInfo holds data about the most recent push event by the owner.
+// LastPushInfo holds the repo of the most recent push event by the owner.
 type LastPushInfo struct {
-	Repo        string
-	Message     string
-	CommittedAt time.Time
+	Repo string
 }
 
-// LastPush returns the most recent push event for the owner across all repos.
+// LastPush returns the repo of the most recent PushEvent for the owner.
 func (c *GitHubClient) LastPush(ctx context.Context) (LastPushInfo, error) {
 	u, err := safeURL("https://api.github.com", "users", c.owner, "events")
 	if err != nil {
@@ -459,42 +475,22 @@ func (c *GitHubClient) LastPush(ctx context.Context) (LastPushInfo, error) {
 	}
 
 	var events []struct {
-		Type      string    `json:"type"`
-		CreatedAt time.Time `json:"created_at"`
-		Repo      struct {
+		Type string `json:"type"`
+		Repo struct {
 			Name string `json:"name"`
 		} `json:"repo"`
-		Payload struct {
-			Commits []struct {
-				Message string `json:"message"`
-			} `json:"commits"`
-		} `json:"payload"`
 	}
 	if err := json.Unmarshal(body, &events); err != nil {
 		return LastPushInfo{}, fmt.Errorf("last push parse: %w", err)
 	}
 
 	for _, e := range events {
-		if e.Type != "PushEvent" || len(e.Payload.Commits) == 0 {
+		if e.Type != "PushEvent" {
 			continue
 		}
-		// commits are oldest-first; take the last one (most recent in this push)
-		msg := e.Payload.Commits[len(e.Payload.Commits)-1].Message
-		// strip everything after the first newline for the summary line
-		if i := len(msg); i > 0 {
-			for j, ch := range msg {
-				if ch == '\n' {
-					msg = msg[:j]
-					break
-				}
-			}
-		}
 		// repo name is "owner/repo" — strip the owner prefix
-		repoName := e.Repo.Name
-		if idx := len(c.owner) + 1; len(repoName) > idx {
-			repoName = repoName[idx:]
-		}
-		return LastPushInfo{Repo: repoName, Message: msg, CommittedAt: e.CreatedAt}, nil
+		repoName := strings.TrimPrefix(e.Repo.Name, c.owner+"/")
+		return LastPushInfo{Repo: repoName}, nil
 	}
 	return LastPushInfo{}, nil
 }
