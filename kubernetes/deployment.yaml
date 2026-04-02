@@ -19,6 +19,8 @@ spec:
         runAsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
+      imagePullSecrets:
+        - name: ghcr-pat
       containers:
         - name: profile-stats
           image: ghcr.io/oberwager/profile-stats:latest
