@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	ttlStats    = 5 * time.Minute
-	ttlCluster  = 2 * time.Minute
+	ttlStats    = 60 * time.Minute
+	ttlCluster  = 30 * time.Minute
 	ttlPipeline = 5 * time.Minute
 	ttlServices = 1 * time.Minute
 )
@@ -134,6 +134,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if data, ok := s.cache.Get("stats"); ok {
+		w.Header().Set("Server-Timing", "stats;desc=\"cached\";dur=0")
 		writeJSON(w, data)
 		return
 	}
@@ -141,16 +142,22 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var (
-		clusterData  []byte
-		pipelineData []byte
-		servicesData []byte
-		lastPush     sources.LastPushInfo
+		clusterData      []byte
+		pipelineData     []byte
+		servicesData     []byte
+		repoURL          string
+		lastPushRepoName string
 	)
+
+	var clusterDur, servicesDur, lastPushDur time.Duration
+	var pt pipelineTiming
 
 	eg, ctx2 := errgroup.WithContext(ctx)
 
 	eg.Go(func() error {
+		t := time.Now()
 		cr := s.fetchCluster(ctx2)
+		clusterDur = time.Since(t)
 		b, err := json.Marshal(cr)
 		if err != nil {
 			return err
@@ -159,7 +166,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	eg.Go(func() error {
-		pr := s.fetchPipeline(ctx2)
+		var pr PipelineResponse
+		pr, pt = s.fetchPipeline(ctx2)
 		b, err := json.Marshal(pr)
 		if err != nil {
 			return err
@@ -168,7 +176,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	eg.Go(func() error {
+		t := time.Now()
 		sr := s.fetchServices(ctx2)
+		servicesDur = time.Since(t)
 		b, err := json.Marshal(sr)
 		if err != nil {
 			return err
@@ -177,12 +187,22 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	eg.Go(func() error {
+		t := time.Now()
 		lp, err := s.github.LastPush(ctx2)
 		if err != nil {
 			slog.Warn("github last push", "error", err)
+			lastPushDur = time.Since(t)
 			return nil
 		}
-		lastPush = lp
+		// Chain homepage lookup here so it runs concurrently with cluster/pipeline/services.
+		lastPushRepoName = lp.Repo
+		repoURL = fmt.Sprintf("https://github.com/%s/%s", s.owner, lp.Repo)
+		if lp.Repo != "" {
+			if hp, err := s.github.RepoHomepage(ctx2, lp.Repo); err == nil && hp != "" {
+				repoURL = hp
+			}
+		}
+		lastPushDur = time.Since(t)
 		return nil
 	})
 
@@ -204,20 +224,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(servicesData, &services)
 	}
 
-	repoURL := fmt.Sprintf("https://github.com/%s/%s", s.owner, lastPush.Repo)
-	if lastPush.Repo != "" {
-		if hp, err := s.github.RepoHomepage(ctx, lastPush.Repo); err == nil && hp != "" {
-			repoURL = hp
-		}
-	}
-
 	stats := StatsResponse{
 		CachedAt: time.Now(),
 		Cluster:  cluster,
 		Pipeline: pipeline,
 		Services: services,
 		LastWorkedOn: LastWorkedOn{
-			Repo:    lastPush.Repo,
+			Repo:    lastPushRepoName,
 			RepoURL: repoURL,
 		},
 	}
@@ -228,17 +241,27 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		data = []byte(`{}`)
 	}
 
+	w.Header().Set("Server-Timing", fmt.Sprintf(
+		"cluster;desc=\"Prometheus+Alertmanager\";dur=%.0f, services;desc=\"UptimeKuma\";dur=%.0f, last_push;desc=\"GitHub LastPush+Homepage\";dur=%.0f, ",
+		float64(clusterDur.Milliseconds()),
+		float64(servicesDur.Milliseconds()),
+		float64(lastPushDur.Milliseconds()),
+	)+pipelineServerTiming(pt))
+
 	s.cache.Set("stats", data, ttlStats)
 	writeJSON(w, data)
 }
 
 func (s *Server) handleCluster(w http.ResponseWriter, r *http.Request) {
 	if data, ok := s.cache.Get("cluster"); ok {
+		w.Header().Set("Server-Timing", "cluster;desc=\"cached\";dur=0")
 		writeJSON(w, data)
 		return
 	}
 
+	t := time.Now()
 	cr := s.fetchCluster(r.Context())
+	w.Header().Set("Server-Timing", fmt.Sprintf("cluster;desc=\"Prometheus+Alertmanager\";dur=%.0f", float64(time.Since(t).Milliseconds())))
 
 	data, err := json.Marshal(cr)
 	if err != nil {
@@ -435,11 +458,13 @@ func (s *Server) fetchCluster(ctx context.Context) ClusterResponse {
 
 func (s *Server) handlePipeline(w http.ResponseWriter, r *http.Request) {
 	if data, ok := s.cache.Get("pipeline"); ok {
+		w.Header().Set("Server-Timing", "gh_pipeline;desc=\"cached\";dur=0")
 		writeJSON(w, data)
 		return
 	}
 
-	pr := s.fetchPipeline(r.Context())
+	pr, pt := s.fetchPipeline(r.Context())
+	w.Header().Set("Server-Timing", pipelineServerTiming(pt))
 
 	data, err := json.Marshal(pr)
 	if err != nil {
@@ -451,7 +476,26 @@ func (s *Server) handlePipeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, data)
 }
 
-func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
+type pipelineTiming struct {
+	runs      time.Duration
+	images    time.Duration
+	homepages time.Duration
+	versions  time.Duration
+	cosign    time.Duration
+}
+
+func pipelineServerTiming(pt pipelineTiming) string {
+	return fmt.Sprintf(
+		"gh_runs;desc=\"WorkflowRuns\";dur=%.0f, gh_images;desc=\"ImageManifests\";dur=%.0f, gh_homepages;desc=\"RepoHomepages\";dur=%.0f, gh_versions;desc=\"CurrentVersions\";dur=%.0f, gh_cosign;desc=\"CosignChecks\";dur=%.0f",
+		float64(pt.runs.Milliseconds()),
+		float64(pt.images.Milliseconds()),
+		float64(pt.homepages.Milliseconds()),
+		float64(pt.versions.Milliseconds()),
+		float64(pt.cosign.Milliseconds()),
+	)
+}
+
+func (s *Server) fetchPipeline(ctx context.Context) (PipelineResponse, pipelineTiming) {
 	type repoRuns struct {
 		repo string
 		runs []sources.WorkflowRun
@@ -462,15 +506,18 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 		sizeBytes int64
 	}
 
+	var pt pipelineTiming
+
 	runsCh := make([]repoRuns, len(s.managedRepos))
 	imagesCh := make([]repoImage, len(s.managedRepos))
 	homepagesCh := make([]string, len(s.managedRepos))
 
-	// Fetch workflow runs, image manifests, and repo homepages in parallel.
+	// Phase 1: workflow runs, image manifests, repo homepages — all in parallel.
 	var wg12 sync.WaitGroup
 	wg12.Add(3)
 	go func() {
 		defer wg12.Done()
+		t := time.Now()
 		eg, egCtx := errgroup.WithContext(ctx)
 		for i, repo := range s.managedRepos {
 			i, repo := i, repo
@@ -478,7 +525,7 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 				runs, err := s.github.WorkflowRuns(egCtx, repo)
 				if err != nil {
 					slog.Warn("github workflow runs", "repo", repo, "error", err)
-					runsCh[i] = repoRuns{repo: repo, runs: nil}
+					runsCh[i] = repoRuns{repo: repo}
 					return nil
 				}
 				runsCh[i] = repoRuns{repo: repo, runs: runs}
@@ -486,9 +533,11 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 			})
 		}
 		_ = eg.Wait()
+		pt.runs = time.Since(t)
 	}()
 	go func() {
 		defer wg12.Done()
+		t := time.Now()
 		eg, egCtx := errgroup.WithContext(ctx)
 		for i, repo := range s.managedRepos {
 			i, repo := i, repo
@@ -504,9 +553,11 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 			})
 		}
 		_ = eg.Wait()
+		pt.images = time.Since(t)
 	}()
 	go func() {
 		defer wg12.Done()
+		t := time.Now()
 		eg, egCtx := errgroup.WithContext(ctx)
 		for i, repo := range s.managedRepos {
 			i, repo := i, repo
@@ -521,6 +572,7 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 			})
 		}
 		_ = eg.Wait()
+		pt.homepages = time.Since(t)
 	}()
 	wg12.Wait()
 
@@ -532,13 +584,14 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 		sizeMap[img.repo] = img.sizeBytes
 	}
 
-	// Version lookup and cosign check in parallel (both depend only on digestMap).
+	// Phase 2: version lookup and cosign check in parallel.
 	versionMap := make(map[string]string, len(s.managedRepos))
 	cosignChecked := make([]bool, len(s.managedRepos))
 	var wg34 sync.WaitGroup
 	wg34.Add(2)
 	go func() {
 		defer wg34.Done()
+		t := time.Now()
 		eg, egCtx := errgroup.WithContext(ctx)
 		for _, repo := range s.managedRepos {
 			repo := repo
@@ -547,7 +600,7 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 				if digest == "" {
 					return nil
 				}
-				ver, err := s.github.CurrentVersion(egCtx, repo, digest)
+				ver, err := s.github.CurrentVersion(egCtx, repo)
 				if err != nil {
 					slog.Warn("github current version", "repo", repo, "error", err)
 					return nil
@@ -557,9 +610,11 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 			})
 		}
 		_ = eg.Wait()
+		pt.versions = time.Since(t)
 	}()
 	go func() {
 		defer wg34.Done()
+		t := time.Now()
 		eg, egCtx := errgroup.WithContext(ctx)
 		for i, repo := range s.managedRepos {
 			i, repo := i, repo
@@ -578,6 +633,7 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 			})
 		}
 		_ = eg.Wait()
+		pt.cosign = time.Since(t)
 	}()
 	wg34.Wait()
 
@@ -597,7 +653,6 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 		repos              []RepoSummary
 	)
 
-	// Build per-repo maps
 	runsMap := make(map[string][]sources.WorkflowRun, len(s.managedRepos))
 	for _, rr := range runsCh {
 		runsMap[rr.repo] = rr.runs
@@ -617,7 +672,6 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 					lastRunSeconds = int(run.UpdatedAt.Sub(run.CreatedAt).Seconds())
 				}
 			}
-
 			if run.Status == "completed" {
 				totalCompleted++
 				if run.Conclusion == "success" {
@@ -628,7 +682,6 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 					}
 				}
 			}
-
 			if run.CreatedAt.After(cutoff) && run.Conclusion == "success" {
 				totalDeploys30d++
 			}
@@ -639,12 +692,11 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 			repoURL = fmt.Sprintf("https://github.com/%s/%s", s.owner, repo)
 		}
 
-		sizeBytes := sizeMap[repo]
 		repos = append(repos, RepoSummary{
 			Name:              repo,
 			RepoURL:           repoURL,
 			CurrentVersion:    versionMap[repo],
-			ImageSizeDisplay:  formatBytes(sizeBytes),
+			ImageSizeDisplay:  formatBytes(sizeMap[repo]),
 			CosignVerified:    cosignMap[repo],
 			LastRunConclusion: lastRunConclusion,
 			LastRunSeconds:    lastRunSeconds,
@@ -656,7 +708,6 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 	if totalSuccessful > 0 {
 		avgDeploySeconds = totalDeploySeconds / totalSuccessful
 	}
-
 	var successRatePct float64
 	if totalCompleted > 0 {
 		successRatePct = math.Round(float64(totalSuccessful)/float64(totalCompleted)*10000) / 100
@@ -669,10 +720,9 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 		DeploysLast30Days:    totalDeploys30d,
 		DeploySuccessRatePct: successRatePct,
 		Repos:                repos,
-	}
+	}, pt
 }
 
-// allWorkflowRuns returns all WorkflowRun values across all repos (helper for health check).
 func allWorkflowRuns(m map[string][]sources.WorkflowRun) []sources.WorkflowRun {
 	var all []sources.WorkflowRun
 	for _, v := range m {
@@ -683,11 +733,14 @@ func allWorkflowRuns(m map[string][]sources.WorkflowRun) []sources.WorkflowRun {
 
 func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 	if data, ok := s.cache.Get("services"); ok {
+		w.Header().Set("Server-Timing", "services;desc=\"cached\";dur=0")
 		writeJSON(w, data)
 		return
 	}
 
+	t := time.Now()
 	sr := s.fetchServices(r.Context())
+	w.Header().Set("Server-Timing", fmt.Sprintf("services;desc=\"UptimeKuma\";dur=%.0f", float64(time.Since(t).Milliseconds())))
 
 	data, err := json.Marshal(sr)
 	if err != nil {

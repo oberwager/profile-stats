@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -27,10 +26,14 @@ type GitHubClient struct {
 }
 
 func NewGitHubClient(pat, owner string) *GitHubClient {
+	transport := &http.Transport{
+		MaxIdleConnsPerHost: 20,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	c := &GitHubClient{
 		pat:        pat,
 		owner:      owner,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{Timeout: 10 * time.Second, Transport: transport},
 		tokenCache: make(map[string]cachedToken),
 	}
 	go c.tokenCacheCleanupLoop()
@@ -250,76 +253,45 @@ func (c *GitHubClient) ImageManifest(ctx context.Context, repo string) (digest s
 	return digest, total, nil
 }
 
-var semverRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
-
-// CurrentVersion fetches the tag list and returns the semver tag matching the :latest digest.
-func (c *GitHubClient) CurrentVersion(ctx context.Context, repo, latestDigest string) (string, error) {
+// CurrentVersion returns the tag name of the latest GitHub release for the repo.
+func (c *GitHubClient) CurrentVersion(ctx context.Context, repo string) (string, error) {
 	if err := validateRepoName(repo); err != nil {
-		return "", fmt.Errorf("ghcr tags: %w", err)
+		return "", fmt.Errorf("current version: %w", err)
 	}
-	token, err := c.ghcrToken(ctx, repo)
+	u, err := safeURL("https://api.github.com", "repos", c.owner, repo, "releases/latest")
 	if err != nil {
-		return "", fmt.Errorf("ghcr tags: %w", err)
+		return "", fmt.Errorf("current version URL: %w", err)
 	}
-	tagsURL, err := safeURL("https://ghcr.io", "v2", c.owner, repo, "tags/list")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", fmt.Errorf("ghcr tags URL: %w", err)
+		return "", fmt.Errorf("current version request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tagsURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("ghcr tags request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("ghcr tags fetch: %w", err)
+		return "", fmt.Errorf("current version fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return "", fmt.Errorf("ghcr tags read: %w", err)
+		return "", fmt.Errorf("current version read: %w", err)
 	}
 
-	var tagList struct {
-		Tags []string `json:"tags"`
+	var result struct {
+		TagName string `json:"tag_name"`
 	}
-	if err := json.Unmarshal(body, &tagList); err != nil {
-		return "", fmt.Errorf("ghcr tags parse: %w", err)
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("current version parse: %w", err)
 	}
-
-	var semverTags []string
-	for _, tag := range tagList.Tags {
-		if semverRe.MatchString(tag) {
-			semverTags = append(semverTags, tag)
-		}
-	}
-
-	type tagResult struct {
-		tag    string
-		digest string
-	}
-	results := make([]tagResult, len(semverTags))
-	var wg sync.WaitGroup
-	for i, tag := range semverTags {
-		i, tag := i, tag
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			d, _, _ := c.fetchManifestDigest(ctx, repo, tag, token)
-			results[i] = tagResult{tag: tag, digest: d}
-		}()
-	}
-	wg.Wait()
-
-	for _, r := range results {
-		if r.digest == latestDigest {
-			return r.tag, nil
-		}
-	}
-	return "", nil
+	return result.TagName, nil
 }
 
 func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag, token string) (string, int64, error) {
