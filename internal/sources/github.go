@@ -8,23 +8,29 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 )
 
+type cachedToken struct {
+	token  string
+	expiry time.Time
+}
 
 type GitHubClient struct {
 	pat        string
 	owner      string
 	httpClient *http.Client
+	tokenMu    sync.Mutex
+	tokenCache map[string]cachedToken
 }
 
 func NewGitHubClient(pat, owner string) *GitHubClient {
 	return &GitHubClient{
-		pat:   pat,
-		owner: owner,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		pat:        pat,
+		owner:      owner,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		tokenCache: make(map[string]cachedToken),
 	}
 }
 
@@ -99,6 +105,13 @@ func (c *GitHubClient) WorkflowRuns(ctx context.Context, repo string) ([]Workflo
 
 // ghcrToken exchanges the PAT for a short-lived registry JWT scoped to a single repo.
 func (c *GitHubClient) ghcrToken(ctx context.Context, repo string) (string, error) {
+	c.tokenMu.Lock()
+	if cached, ok := c.tokenCache[repo]; ok && time.Now().Before(cached.expiry) {
+		c.tokenMu.Unlock()
+		return cached.token, nil
+	}
+	c.tokenMu.Unlock()
+
 	u := fmt.Sprintf("https://ghcr.io/token?service=ghcr.io&scope=repository:%s/%s:pull", c.owner, repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -118,7 +131,8 @@ func (c *GitHubClient) ghcrToken(ctx context.Context, repo string) (string, erro
 	}
 
 	var result struct {
-		Token string `json:"token"`
+		Token     string `json:"token"`
+		ExpiresIn int    `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", fmt.Errorf("ghcr token parse: %w", err)
@@ -126,6 +140,15 @@ func (c *GitHubClient) ghcrToken(ctx context.Context, repo string) (string, erro
 	if result.Token == "" {
 		return "", fmt.Errorf("ghcr token: empty response")
 	}
+
+	ttl := time.Duration(result.ExpiresIn) * time.Second
+	if ttl <= 0 {
+		ttl = 4 * time.Minute
+	}
+	c.tokenMu.Lock()
+	c.tokenCache[repo] = cachedToken{token: result.Token, expiry: time.Now().Add(ttl - 30*time.Second)}
+	c.tokenMu.Unlock()
+
 	return result.Token, nil
 }
 
@@ -251,19 +274,35 @@ func (c *GitHubClient) CurrentVersion(ctx context.Context, repo, latestDigest st
 		return "", fmt.Errorf("ghcr tags parse: %w", err)
 	}
 
+	var semverTags []string
 	for _, tag := range tagList.Tags {
-		if !semverRe.MatchString(tag) {
-			continue
-		}
-		tagDigest, _, err := c.fetchManifestDigest(ctx, repo, tag, token)
-		if err != nil {
-			continue
-		}
-		if tagDigest == latestDigest {
-			return tag, nil
+		if semverRe.MatchString(tag) {
+			semverTags = append(semverTags, tag)
 		}
 	}
 
+	type tagResult struct {
+		tag    string
+		digest string
+	}
+	results := make([]tagResult, len(semverTags))
+	var wg sync.WaitGroup
+	for i, tag := range semverTags {
+		i, tag := i, tag
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d, _, _ := c.fetchManifestDigest(ctx, repo, tag, token)
+			results[i] = tagResult{tag: tag, digest: d}
+		}()
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.digest == latestDigest {
+			return r.tag, nil
+		}
+	}
 	return "", nil
 }
 
@@ -311,54 +350,39 @@ func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag, token
 	return resp.Header.Get("Docker-Content-Digest"), total, nil
 }
 
-// IsCosignSigned checks whether a cosign v2 signature exists for the given image
-// digest via the OCI Referrers API. It looks for a referrer with artifactType
-// "application/vnd.dev.cosign.artifact.sig.v1+json" and does not re-verify the
-// cryptographic signature or Fulcio certificate chain.
+// IsCosignSigned checks the Rekor transparency log for a keyless cosign signature
+// matching the given image digest. All keyless cosign signatures are publicly
+// logged in Rekor, making this more reliable than querying GHCR's OCI API directly.
 func (c *GitHubClient) IsCosignSigned(ctx context.Context, repo, digest string) (bool, error) {
-	if err := validateRepoName(repo); err != nil {
-		return false, fmt.Errorf("cosign check: %w", err)
-	}
-	token, err := c.ghcrToken(ctx, repo)
+	body, err := json.Marshal(map[string]string{"hash": digest})
 	if err != nil {
-		return false, fmt.Errorf("cosign check: %w", err)
+		return false, fmt.Errorf("rekor request: %w", err)
 	}
-
-	u := fmt.Sprintf("https://ghcr.io/v2/%s/%s/referrers/%s", c.owner, repo, digest)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://rekor.sigstore.dev/api/v1/index/retrieve",
+		bytes.NewReader(body))
 	if err != nil {
-		return false, fmt.Errorf("cosign check request: %w", err)
+		return false, fmt.Errorf("rekor request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json")
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("cosign check fetch: %w", err)
+		return false, fmt.Errorf("rekor fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return false, fmt.Errorf("cosign check read: %w", err)
+		return false, fmt.Errorf("rekor read: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return false, nil
 	}
 
-	var index struct {
-		Manifests []struct {
-			ArtifactType string `json:"artifactType"`
-		} `json:"manifests"`
+	var uuids []string
+	if err := json.Unmarshal(respBody, &uuids); err != nil {
+		return false, fmt.Errorf("rekor parse: %w", err)
 	}
-	if err := json.Unmarshal(body, &index); err != nil {
-		return false, fmt.Errorf("cosign check parse: %w", err)
-	}
-
-	for _, m := range index.Manifests {
-		if m.ArtifactType == "application/vnd.dev.cosign.artifact.sig.v1+json" {
-			return true, nil
-		}
-	}
-	return false, nil
+	return len(uuids) > 0, nil
 }

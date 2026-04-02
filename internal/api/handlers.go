@@ -453,39 +453,48 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 	runsCh := make([]repoRuns, len(s.managedRepos))
 	imagesCh := make([]repoImage, len(s.managedRepos))
 
-	eg1, eg1Ctx := errgroup.WithContext(ctx)
-	for i, repo := range s.managedRepos {
-		i, repo := i, repo
-		eg1.Go(func() error {
-			runs, err := s.github.WorkflowRuns(eg1Ctx, repo)
-			if err != nil {
-				slog.Warn("github workflow runs", "repo", repo, "error", err)
-				runsCh[i] = repoRuns{repo: repo, runs: nil}
+	// Fetch workflow runs and image manifests in parallel.
+	var wg12 sync.WaitGroup
+	wg12.Add(2)
+	go func() {
+		defer wg12.Done()
+		eg, egCtx := errgroup.WithContext(ctx)
+		for i, repo := range s.managedRepos {
+			i, repo := i, repo
+			eg.Go(func() error {
+				runs, err := s.github.WorkflowRuns(egCtx, repo)
+				if err != nil {
+					slog.Warn("github workflow runs", "repo", repo, "error", err)
+					runsCh[i] = repoRuns{repo: repo, runs: nil}
+					return nil
+				}
+				runsCh[i] = repoRuns{repo: repo, runs: runs}
 				return nil
-			}
-			runsCh[i] = repoRuns{repo: repo, runs: runs}
-			return nil
-		})
-	}
-	_ = eg1.Wait()
-
-	eg2, eg2Ctx := errgroup.WithContext(ctx)
-	for i, repo := range s.managedRepos {
-		i, repo := i, repo
-		eg2.Go(func() error {
-			digest, sizeBytes, err := s.github.ImageManifest(eg2Ctx, repo)
-			if err != nil {
-				slog.Warn("github image manifest", "repo", repo, "error", err)
-				imagesCh[i] = repoImage{repo: repo}
+			})
+		}
+		_ = eg.Wait()
+	}()
+	go func() {
+		defer wg12.Done()
+		eg, egCtx := errgroup.WithContext(ctx)
+		for i, repo := range s.managedRepos {
+			i, repo := i, repo
+			eg.Go(func() error {
+				digest, sizeBytes, err := s.github.ImageManifest(egCtx, repo)
+				if err != nil {
+					slog.Warn("github image manifest", "repo", repo, "error", err)
+					imagesCh[i] = repoImage{repo: repo}
+					return nil
+				}
+				imagesCh[i] = repoImage{repo: repo, digest: digest, sizeBytes: sizeBytes}
 				return nil
-			}
-			imagesCh[i] = repoImage{repo: repo, digest: digest, sizeBytes: sizeBytes}
-			return nil
-		})
-	}
-	_ = eg2.Wait()
+			})
+		}
+		_ = eg.Wait()
+	}()
+	wg12.Wait()
 
-	// Map repo -> digest for version lookup
+	// Map repo -> digest for version and cosign lookups.
 	digestMap := make(map[string]string, len(s.managedRepos))
 	sizeMap := make(map[string]int64, len(s.managedRepos))
 	for _, img := range imagesCh {
@@ -493,47 +502,54 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 		sizeMap[img.repo] = img.sizeBytes
 	}
 
-	// Version lookup: try for each repo
+	// Version lookup and cosign check in parallel (both depend only on digestMap).
 	versionMap := make(map[string]string, len(s.managedRepos))
-	eg3, eg3Ctx := errgroup.WithContext(ctx)
-	for _, repo := range s.managedRepos {
-		repo := repo
-		eg3.Go(func() error {
-			digest := digestMap[repo]
-			if digest == "" {
-				return nil
-			}
-			ver, err := s.github.CurrentVersion(eg3Ctx, repo, digest)
-			if err != nil {
-				slog.Warn("github current version", "repo", repo, "error", err)
-				return nil
-			}
-			versionMap[repo] = ver
-			return nil
-		})
-	}
-	_ = eg3.Wait()
-
-	// Cosign signature existence check (one HEAD request per repo per digest)
 	cosignChecked := make([]bool, len(s.managedRepos))
-	eg4, eg4Ctx := errgroup.WithContext(ctx)
-	for i, repo := range s.managedRepos {
-		i, repo := i, repo
-		eg4.Go(func() error {
-			digest := digestMap[repo]
-			if digest == "" {
+	var wg34 sync.WaitGroup
+	wg34.Add(2)
+	go func() {
+		defer wg34.Done()
+		eg, egCtx := errgroup.WithContext(ctx)
+		for _, repo := range s.managedRepos {
+			repo := repo
+			eg.Go(func() error {
+				digest := digestMap[repo]
+				if digest == "" {
+					return nil
+				}
+				ver, err := s.github.CurrentVersion(egCtx, repo, digest)
+				if err != nil {
+					slog.Warn("github current version", "repo", repo, "error", err)
+					return nil
+				}
+				versionMap[repo] = ver
 				return nil
-			}
-			signed, err := s.github.IsCosignSigned(eg4Ctx, repo, digest)
-			if err != nil {
-				slog.Warn("github cosign check", "repo", repo, "error", err)
+			})
+		}
+		_ = eg.Wait()
+	}()
+	go func() {
+		defer wg34.Done()
+		eg, egCtx := errgroup.WithContext(ctx)
+		for i, repo := range s.managedRepos {
+			i, repo := i, repo
+			eg.Go(func() error {
+				digest := digestMap[repo]
+				if digest == "" {
+					return nil
+				}
+				signed, err := s.github.IsCosignSigned(egCtx, repo, digest)
+				if err != nil {
+					slog.Warn("github cosign check", "repo", repo, "error", err)
+					return nil
+				}
+				cosignChecked[i] = signed
 				return nil
-			}
-			cosignChecked[i] = signed
-			return nil
-		})
-	}
-	_ = eg4.Wait()
+			})
+		}
+		_ = eg.Wait()
+	}()
+	wg34.Wait()
 
 	cosignMap := make(map[string]bool, len(s.managedRepos))
 	for i, repo := range s.managedRepos {
@@ -695,17 +711,37 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 
 	var (
 		serviceStatuses []ServiceStatus
-		totalUptime30d  float64
+		totalUptime90d  float64
 		totalUptime24h  float64
 		servicesUp      int
 		servicesDown    int
 	)
 
-	slog.Info("uptime kuma uptime keys", "keys", heartbeat.UptimeList)
+	// Fetch 90-day uptime for each monitor in parallel via the badge API.
+	uptime90dMap := make(map[int]float64, len(monitors))
+	var badgeMu sync.Mutex
+	var badgeWg sync.WaitGroup
+	for _, mon := range monitors {
+		mon := mon
+		badgeWg.Add(1)
+		go func() {
+			defer badgeWg.Done()
+			pct, err := s.uptimeKuma.UptimeBadge(ctx, mon.ID, 2160)
+			if err != nil {
+				slog.Warn("uptime kuma 90d badge", "monitor", mon.ID, "error", err)
+				return
+			}
+			badgeMu.Lock()
+			uptime90dMap[mon.ID] = pct
+			badgeMu.Unlock()
+		}()
+	}
+	badgeWg.Wait()
+
 	for _, mon := range monitors {
 		idStr := strconv.Itoa(mon.ID)
 		uptime24h := heartbeat.UptimeList[idStr+"_24"]
-		uptime30d := heartbeat.UptimeList[idStr+"_720"]
+		uptime90d := uptime90dMap[mon.ID]
 
 		up := uptime24h > 0.95
 
@@ -742,14 +778,14 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 			Name:          mon.Name,
 			MonitorID:     mon.ID,
 			Uptime24h:     uptime24h,
-			Uptime30d:     uptime30d,
+			Uptime90d:     uptime90d,
 			Up:            up,
 			LastStatus:    lastStatus,
 			LastCheckedAt: lastCheckedAt,
 			AvgPingMs:     avgPingMs,
 		}
 		serviceStatuses = append(serviceStatuses, ss)
-		totalUptime30d += uptime30d
+		totalUptime90d += uptime90d
 		totalUptime24h += uptime24h
 		if up {
 			servicesUp++
@@ -758,9 +794,9 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 		}
 	}
 
-	var uptime30DayPct, uptime24HourPct float64
+	var uptime90DayPct, uptime24HourPct float64
 	if len(serviceStatuses) > 0 {
-		uptime30DayPct = (totalUptime30d / float64(len(serviceStatuses))) * 100
+		uptime90DayPct = (totalUptime90d / float64(len(serviceStatuses))) * 100
 		uptime24HourPct = (totalUptime24h / float64(len(serviceStatuses))) * 100
 	}
 
@@ -769,7 +805,7 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 	}
 
 	return ServicesResponse{
-		Uptime30DayPct:  uptime30DayPct,
+		Uptime90DayPct:  uptime90DayPct,
 		Uptime24HourPct: uptime24HourPct,
 		ServicesUp:      servicesUp,
 		ServicesDown:    servicesDown,

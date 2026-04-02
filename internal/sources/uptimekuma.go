@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -116,6 +118,40 @@ func (c *UptimeKumaClient) StatusPage(ctx context.Context, slug string) ([]Monit
 	}
 
 	return monitors, nil
+}
+
+// UptimeBadge fetches /api/badge/{monitorID}/uptime/{hours}?format=json and
+// returns the uptime as a fraction in [0, 1].
+func (c *UptimeKumaClient) UptimeBadge(ctx context.Context, monitorID, hours int) (float64, error) {
+	u := fmt.Sprintf("%s/api/badge/%d/uptime/%d?format=json", c.baseURL, monitorID, hours)
+	req, err := c.newRequest(ctx, http.MethodGet, u)
+	if err != nil {
+		return 0, fmt.Errorf("uptime kuma badge request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("uptime kuma badge fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return 0, fmt.Errorf("uptime kuma badge read: %w", err)
+	}
+
+	var badge struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &badge); err != nil {
+		return 0, fmt.Errorf("uptime kuma badge parse: %w", err)
+	}
+
+	pct, err := strconv.ParseFloat(strings.TrimSuffix(badge.Message, "%"), 64)
+	if err != nil {
+		return 0, fmt.Errorf("uptime kuma badge value %q: %w", badge.Message, err)
+	}
+	return pct / 100, nil
 }
 
 // Heartbeat fetches /api/status-page/heartbeat/{slug}.

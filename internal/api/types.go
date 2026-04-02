@@ -60,7 +60,7 @@ type RepoSummary struct {
 }
 
 type ServicesResponse struct {
-	Uptime30DayPct  float64         `json:"uptime_30day_pct"`
+	Uptime90DayPct  float64         `json:"uptime_90day_pct"`
 	Uptime24HourPct float64         `json:"uptime_24hour_pct"`
 	ServicesUp      int             `json:"services_up"`
 	ServicesDown    int             `json:"services_down"`
@@ -71,7 +71,7 @@ type ServiceStatus struct {
 	Name          string    `json:"name"`
 	MonitorID     int       `json:"monitor_id"`
 	Uptime24h     float64   `json:"uptime_24h"`
-	Uptime30d     float64   `json:"uptime_30d"`
+	Uptime90d     float64   `json:"uptime_90d"`
 	Up            bool      `json:"up"`
 	LastStatus    int       `json:"last_status"`
 	LastCheckedAt time.Time `json:"last_checked_at"`
