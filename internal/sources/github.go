@@ -39,7 +39,6 @@ type WorkflowRun struct {
 	Status     string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
-	Path       string
 }
 
 type workflowRunsResponse struct {
@@ -96,7 +95,6 @@ func (c *GitHubClient) WorkflowRuns(ctx context.Context, repo string) ([]Workflo
 			Status:     r.Status,
 			CreatedAt:  r.CreatedAt,
 			UpdatedAt:  r.UpdatedAt,
-			Path:       r.Path,
 		})
 	}
 
@@ -353,7 +351,7 @@ func (c *GitHubClient) fetchManifestDigest(ctx context.Context, repo, tag, token
 // IsCosignSigned checks the Rekor transparency log for a keyless cosign signature
 // matching the given image digest. All keyless cosign signatures are publicly
 // logged in Rekor, making this more reliable than querying GHCR's OCI API directly.
-func (c *GitHubClient) IsCosignSigned(ctx context.Context, repo, digest string) (bool, error) {
+func (c *GitHubClient) IsCosignSigned(ctx context.Context, digest string) (bool, error) {
 	body, err := json.Marshal(map[string]string{"hash": digest})
 	if err != nil {
 		return false, fmt.Errorf("rekor request: %w", err)
@@ -385,4 +383,114 @@ func (c *GitHubClient) IsCosignSigned(ctx context.Context, repo, digest string) 
 		return false, fmt.Errorf("rekor parse: %w", err)
 	}
 	return len(uuids) > 0, nil
+}
+
+// RepoHomepage returns the homepage URL set on a GitHub repo, or empty string if unset.
+func (c *GitHubClient) RepoHomepage(ctx context.Context, repo string) (string, error) {
+	if err := validateRepoName(repo); err != nil {
+		return "", fmt.Errorf("repo homepage: %w", err)
+	}
+	u, err := safeURL("https://api.github.com", "repos", c.owner, repo)
+	if err != nil {
+		return "", fmt.Errorf("repo homepage URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", fmt.Errorf("repo homepage request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("repo homepage fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return "", fmt.Errorf("repo homepage read: %w", err)
+	}
+
+	var result struct {
+		Homepage string `json:"homepage"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("repo homepage parse: %w", err)
+	}
+	return result.Homepage, nil
+}
+
+// LastPushInfo holds data about the most recent push event by the owner.
+type LastPushInfo struct {
+	Repo        string
+	Message     string
+	CommittedAt time.Time
+}
+
+// LastPush returns the most recent push event for the owner across all repos.
+func (c *GitHubClient) LastPush(ctx context.Context) (LastPushInfo, error) {
+	u, err := safeURL("https://api.github.com", "users", c.owner, "events")
+	if err != nil {
+		return LastPushInfo{}, fmt.Errorf("last push URL: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u+"?per_page=5", nil)
+	if err != nil {
+		return LastPushInfo{}, fmt.Errorf("last push request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return LastPushInfo{}, fmt.Errorf("last push fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return LastPushInfo{}, fmt.Errorf("last push read: %w", err)
+	}
+
+	var events []struct {
+		Type      string    `json:"type"`
+		CreatedAt time.Time `json:"created_at"`
+		Repo      struct {
+			Name string `json:"name"`
+		} `json:"repo"`
+		Payload struct {
+			Commits []struct {
+				Message string `json:"message"`
+			} `json:"commits"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(body, &events); err != nil {
+		return LastPushInfo{}, fmt.Errorf("last push parse: %w", err)
+	}
+
+	for _, e := range events {
+		if e.Type != "PushEvent" || len(e.Payload.Commits) == 0 {
+			continue
+		}
+		// commits are oldest-first; take the last one (most recent in this push)
+		msg := e.Payload.Commits[len(e.Payload.Commits)-1].Message
+		// strip everything after the first newline for the summary line
+		if i := len(msg); i > 0 {
+			for j, ch := range msg {
+				if ch == '\n' {
+					msg = msg[:j]
+					break
+				}
+			}
+		}
+		// repo name is "owner/repo" — strip the owner prefix
+		repoName := e.Repo.Name
+		if idx := len(c.owner) + 1; len(repoName) > idx {
+			repoName = repoName[idx:]
+		}
+		return LastPushInfo{Repo: repoName, Message: msg, CommittedAt: e.CreatedAt}, nil
+	}
+	return LastPushInfo{}, nil
 }

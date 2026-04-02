@@ -3,10 +3,18 @@ package api
 import "time"
 
 type StatsResponse struct {
-	CachedAt time.Time        `json:"cached_at"`
-	Cluster  ClusterResponse  `json:"cluster"`
-	Pipeline PipelineResponse `json:"pipeline"`
-	Services ServicesResponse `json:"services"`
+	CachedAt     time.Time        `json:"cached_at"`
+	Cluster      ClusterResponse  `json:"cluster"`
+	Pipeline     PipelineResponse `json:"pipeline"`
+	Services     ServicesResponse `json:"services"`
+	LastWorkedOn LastWorkedOn     `json:"last_worked_on"`
+}
+
+type LastWorkedOn struct {
+	Repo        string    `json:"repo"`
+	RepoURL     string    `json:"repo_url"`
+	Message     string    `json:"message"`
+	CommittedAt time.Time `json:"committed_at"`
 }
 
 type ClusterResponse struct {
@@ -15,7 +23,6 @@ type ClusterResponse struct {
 	MemTotalBytes              int64        `json:"mem_total_bytes"`
 	DiskUsedPct                float64      `json:"disk_used_pct"`
 	Load1                      float64      `json:"load1"`
-	NodeUptimeSeconds          int64        `json:"node_uptime_seconds"`
 	NodeUptimeDisplay          string       `json:"node_uptime_display"`
 	PodsRunning                int          `json:"pods_running"`
 	PodsUnhealthy              int          `json:"pods_unhealthy"`
@@ -36,27 +43,21 @@ type AlertSummary struct {
 }
 
 type PipelineResponse struct {
-	AvgDeploySeconds     int          `json:"avg_deploy_seconds"`
-	AvgDeployDisplay     string       `json:"avg_deploy_display"`
-	DeploysLast30Days    int          `json:"deploys_last_30_days"`
-	DeploySuccessRatePct float64      `json:"deploy_success_rate_pct"`
+	AvgDeployDisplay     string        `json:"avg_deploy_display"`
+	DeploysLast30Days    int           `json:"deploys_last_30_days"`
+	DeploySuccessRatePct float64       `json:"deploy_success_rate_pct"`
 	Repos                []RepoSummary `json:"repos"`
-	LastDeployAt         time.Time    `json:"last_deploy_at"`
-	LastDeployRepo       string       `json:"last_deploy_repo"`
 }
 
 type RepoSummary struct {
 	Name              string    `json:"name"`
-	URL               string    `json:"url"`
+	RepoURL           string    `json:"repo_url"`
 	CurrentVersion    string    `json:"current_version"`
-	ImageDigest       string    `json:"image_digest"`
-	ImageSizeBytes    int64     `json:"image_size_bytes"`
 	ImageSizeDisplay  string    `json:"image_size_display"`
 	CosignVerified    bool      `json:"cosign_verified"`
 	LastRunConclusion string    `json:"last_run_conclusion"`
 	LastRunSeconds    int       `json:"last_run_seconds"`
 	LastRunAt         time.Time `json:"last_run_at"`
-	DeploysLast30Days int       `json:"deploys_last_30_days"`
 }
 
 type ServicesResponse struct {
@@ -68,14 +69,9 @@ type ServicesResponse struct {
 }
 
 type ServiceStatus struct {
-	Name          string    `json:"name"`
-	MonitorID     int       `json:"monitor_id"`
-	Uptime24h     float64   `json:"uptime_24h"`
-	Uptime90d     float64   `json:"uptime_90d"`
-	Up            bool      `json:"up"`
-	LastStatus    int       `json:"last_status"`
-	LastCheckedAt time.Time `json:"last_checked_at"`
-	AvgPingMs     int       `json:"avg_ping_ms"`
+	Name      string  `json:"name"`
+	Uptime24h float64 `json:"uptime_24h"`
+	Up        bool    `json:"up"`
 }
 
 type HealthResponse struct {

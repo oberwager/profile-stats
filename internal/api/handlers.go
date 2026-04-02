@@ -44,6 +44,7 @@ type Server struct {
 	uptimeKuma    *sources.UptimeKumaClient
 	github        *sources.GitHubClient
 	managedRepos  []string
+	owner         string
 	allowedOrigin string
 	version       string
 	startedAt     time.Time
@@ -59,6 +60,7 @@ func NewServer(cfg Config, version string) *Server {
 		uptimeKuma:    sources.NewUptimeKumaClient(cfg.UptimeKumaURL, cfg.UptimeKumaKey),
 		github:        sources.NewGitHubClient(cfg.GitHubPAT, cfg.GitHubOwner),
 		managedRepos:  cfg.ManagedRepos,
+		owner:         cfg.GitHubOwner,
 		allowedOrigin: cfg.AllowedOrigin,
 		version:       version,
 		startedAt:     time.Now(),
@@ -141,6 +143,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		clusterData  []byte
 		pipelineData []byte
 		servicesData []byte
+		lastPush     sources.LastPushInfo
 	)
 
 	eg, ctx2 := errgroup.WithContext(ctx)
@@ -172,6 +175,15 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		servicesData = b
 		return nil
 	})
+	eg.Go(func() error {
+		lp, err := s.github.LastPush(ctx2)
+		if err != nil {
+			slog.Warn("github last push", "error", err)
+			return nil
+		}
+		lastPush = lp
+		return nil
+	})
 
 	if err := eg.Wait(); err != nil {
 		slog.Warn("stats aggregation partial error", "error", err)
@@ -196,6 +208,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		Cluster:  cluster,
 		Pipeline: pipeline,
 		Services: services,
+		LastWorkedOn: LastWorkedOn{
+			Repo:        lastPush.Repo,
+			RepoURL:     fmt.Sprintf("https://github.com/%s/%s", s.owner, lastPush.Repo),
+			Message:     lastPush.Message,
+			CommittedAt: lastPush.CommittedAt,
+		},
 	}
 
 	data, err := json.Marshal(stats)
@@ -406,7 +424,6 @@ func (s *Server) fetchCluster(ctx context.Context) ClusterResponse {
 		MemTotalBytes:              int64(memTotal),
 		DiskUsedPct:                diskUsed,
 		Load1:                      load1,
-		NodeUptimeSeconds:          uptimeSecs,
 		NodeUptimeDisplay:          formatUptime(uptimeSecs),
 		PodsRunning:                int(podsRunning),
 		PodsUnhealthy:              int(podsUnhealthy),
@@ -452,10 +469,11 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 
 	runsCh := make([]repoRuns, len(s.managedRepos))
 	imagesCh := make([]repoImage, len(s.managedRepos))
+	homepagesCh := make([]string, len(s.managedRepos))
 
-	// Fetch workflow runs and image manifests in parallel.
+	// Fetch workflow runs, image manifests, and repo homepages in parallel.
 	var wg12 sync.WaitGroup
-	wg12.Add(2)
+	wg12.Add(3)
 	go func() {
 		defer wg12.Done()
 		eg, egCtx := errgroup.WithContext(ctx)
@@ -487,6 +505,23 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 					return nil
 				}
 				imagesCh[i] = repoImage{repo: repo, digest: digest, sizeBytes: sizeBytes}
+				return nil
+			})
+		}
+		_ = eg.Wait()
+	}()
+	go func() {
+		defer wg12.Done()
+		eg, egCtx := errgroup.WithContext(ctx)
+		for i, repo := range s.managedRepos {
+			i, repo := i, repo
+			eg.Go(func() error {
+				hp, err := s.github.RepoHomepage(egCtx, repo)
+				if err != nil {
+					slog.Warn("github repo homepage", "repo", repo, "error", err)
+					return nil
+				}
+				homepagesCh[i] = hp
 				return nil
 			})
 		}
@@ -538,7 +573,7 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 				if digest == "" {
 					return nil
 				}
-				signed, err := s.github.IsCosignSigned(egCtx, repo, digest)
+				signed, err := s.github.IsCosignSigned(egCtx, digest)
 				if err != nil {
 					slog.Warn("github cosign check", "repo", repo, "error", err)
 					return nil
@@ -564,8 +599,6 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 		totalSuccessful    int
 		totalCompleted     int
 		totalDeploys30d    int
-		lastDeployAt       time.Time
-		lastDeployRepo     string
 		repos              []RepoSummary
 	)
 
@@ -575,26 +608,19 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 		runsMap[rr.repo] = rr.runs
 	}
 
-	for _, repo := range s.managedRepos {
+	for i, repo := range s.managedRepos {
 		runs := runsMap[repo]
 
 		var lastRunConclusion string
 		var lastRunSeconds int
 		var lastRunAt time.Time
-		var deploys30d int
-
-		for i, run := range runs {
-			if i == 0 {
+		for j, run := range runs {
+			if j == 0 {
 				lastRunConclusion = run.Conclusion
 				lastRunAt = run.CreatedAt
 				if run.Status == "completed" {
 					lastRunSeconds = int(run.UpdatedAt.Sub(run.CreatedAt).Seconds())
 				}
-			}
-
-			if run.CreatedAt.After(lastDeployAt) {
-				lastDeployAt = run.CreatedAt
-				lastDeployRepo = repo
 			}
 
 			if run.Status == "completed" {
@@ -609,24 +635,25 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 			}
 
 			if run.CreatedAt.After(cutoff) && run.Conclusion == "success" {
-				deploys30d++
 				totalDeploys30d++
 			}
+		}
+
+		repoURL := homepagesCh[i]
+		if repoURL == "" {
+			repoURL = fmt.Sprintf("https://github.com/%s/%s", s.owner, repo)
 		}
 
 		sizeBytes := sizeMap[repo]
 		repos = append(repos, RepoSummary{
 			Name:              repo,
-			URL:               fmt.Sprintf("https://github.com/oberwager/%s", repo),
+			RepoURL:           repoURL,
 			CurrentVersion:    versionMap[repo],
-			ImageDigest:       digestMap[repo],
-			ImageSizeBytes:    sizeBytes,
 			ImageSizeDisplay:  formatBytes(sizeBytes),
 			CosignVerified:    cosignMap[repo],
 			LastRunConclusion: lastRunConclusion,
 			LastRunSeconds:    lastRunSeconds,
 			LastRunAt:         lastRunAt,
-			DeploysLast30Days: deploys30d,
 		})
 	}
 
@@ -643,13 +670,10 @@ func (s *Server) fetchPipeline(ctx context.Context) PipelineResponse {
 	s.setUpstreamHealth("github", len(allWorkflowRuns(runsMap)) > 0)
 
 	return PipelineResponse{
-		AvgDeploySeconds:     avgDeploySeconds,
 		AvgDeployDisplay:     formatDuration(avgDeploySeconds),
 		DeploysLast30Days:    totalDeploys30d,
 		DeploySuccessRatePct: successRatePct,
 		Repos:                repos,
-		LastDeployAt:         lastDeployAt,
-		LastDeployRepo:       lastDeployRepo,
 	}
 }
 
@@ -745,44 +769,10 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 
 		up := uptime24h > 0.95
 
-		var lastStatus int
-		var lastCheckedAt time.Time
-		var avgPingMs int
-
-		entries := heartbeat.HeartbeatList[idStr]
-		if len(entries) > 0 {
-			last := entries[len(entries)-1]
-			lastStatus = last.Status
-			if t, err := time.Parse("2006-01-02 15:04:05", last.Time); err == nil {
-				lastCheckedAt = t
-			}
-
-			// Average ping of last 10 entries
-			start := len(entries) - 10
-			if start < 0 {
-				start = 0
-			}
-			var pingSum, pingCount int
-			for _, e := range entries[start:] {
-				if e.Ping > 0 {
-					pingSum += e.Ping
-					pingCount++
-				}
-			}
-			if pingCount > 0 {
-				avgPingMs = pingSum / pingCount
-			}
-		}
-
 		ss := ServiceStatus{
-			Name:          mon.Name,
-			MonitorID:     mon.ID,
-			Uptime24h:     uptime24h,
-			Uptime90d:     uptime90d,
-			Up:            up,
-			LastStatus:    lastStatus,
-			LastCheckedAt: lastCheckedAt,
-			AvgPingMs:     avgPingMs,
+			Name:      mon.Name,
+			Uptime24h: uptime24h,
+			Up:        up,
 		}
 		serviceStatuses = append(serviceStatuses, ss)
 		totalUptime90d += uptime90d

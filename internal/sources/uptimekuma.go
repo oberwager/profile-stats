@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -140,16 +141,30 @@ func (c *UptimeKumaClient) UptimeBadge(ctx context.Context, monitorID, hours int
 		return 0, fmt.Errorf("uptime kuma badge read: %w", err)
 	}
 
-	var badge struct {
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(body, &badge); err != nil {
-		return 0, fmt.Errorf("uptime kuma badge parse: %w", err)
+	// Try JSON response first (Uptime Kuma v2+ with ?format=json).
+	if len(body) > 0 && body[0] == '{' {
+		var badge struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(body, &badge); err != nil {
+			return 0, fmt.Errorf("uptime kuma badge parse: %w", err)
+		}
+		pct, err := strconv.ParseFloat(strings.TrimSuffix(badge.Message, "%"), 64)
+		if err != nil {
+			return 0, fmt.Errorf("uptime kuma badge value %q: %w", badge.Message, err)
+		}
+		return pct / 100, nil
 	}
 
-	pct, err := strconv.ParseFloat(strings.TrimSuffix(badge.Message, "%"), 64)
+	// Fall back to extracting percentage from SVG badge.
+	re := regexp.MustCompile(`(\d+(?:\.\d+)?)%`)
+	m := re.FindSubmatch(body)
+	if m == nil {
+		return 0, fmt.Errorf("uptime kuma badge: no percentage found in response")
+	}
+	pct, err := strconv.ParseFloat(string(m[1]), 64)
 	if err != nil {
-		return 0, fmt.Errorf("uptime kuma badge value %q: %w", badge.Message, err)
+		return 0, fmt.Errorf("uptime kuma badge svg value %q: %w", m[1], err)
 	}
 	return pct / 100, nil
 }
