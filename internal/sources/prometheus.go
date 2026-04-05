@@ -142,7 +142,21 @@ func (c *PrometheusClient) PodsRunning(ctx context.Context) (float64, error) {
 }
 
 func (c *PrometheusClient) PodsUnhealthy(ctx context.Context) (float64, error) {
-	return c.Query(ctx, `count(kube_pod_status_phase{phase=~"Pending|Failed|Unknown"} == 1) or vector(0)`)
+	return c.Query(ctx, `count(
+	  (
+	    kube_pod_status_phase{phase=~"Pending|Failed|Unknown"} == 1
+	    unless on(pod, namespace)
+	    kube_pod_owner{owner_kind="Job"}
+	  )
+	  or
+	  (
+	    kube_pod_status_phase{phase=~"Pending|Failed|Unknown"} == 1
+	    and on(pod, namespace)
+	    kube_pod_owner{owner_kind="Job"}
+	    and on(pod, namespace)
+	    (time() - kube_pod_created > 30)
+	  )
+	) or vector(0)`)
 }
 
 func (c *PrometheusClient) NamespaceCount(ctx context.Context) (float64, error) {
