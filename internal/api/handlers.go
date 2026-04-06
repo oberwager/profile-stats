@@ -147,6 +147,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		servicesData     []byte
 		repoURL          string
 		lastPushRepoName string
+		lastPushedAt     time.Time
 	)
 
 	var clusterDur, servicesDur, lastPushDur time.Duration
@@ -196,6 +197,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 		// Chain homepage lookup here so it runs concurrently with cluster/pipeline/services.
 		lastPushRepoName = lp.Repo
+		lastPushedAt = lp.PushedAt
 		repoURL = fmt.Sprintf("https://github.com/%s/%s", s.owner, lp.Repo)
 		if lp.Repo != "" {
 			if hp, err := s.github.RepoHomepage(ctx2, lp.Repo); err == nil && hp != "" {
@@ -230,8 +232,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		Pipeline: pipeline,
 		Services: services,
 		LastWorkedOn: LastWorkedOn{
-			Repo:    lastPushRepoName,
-			RepoURL: repoURL,
+			Repo:     lastPushRepoName,
+			RepoURL:  repoURL,
+			PushedAt: lastPushedAt,
 		},
 	}
 

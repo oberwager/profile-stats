@@ -11,8 +11,9 @@ type StatsResponse struct {
 }
 
 type LastWorkedOn struct {
-	Repo    string `json:"repo"`
-	RepoURL string `json:"repo_url"`
+	Repo      string    `json:"repo"`
+	RepoURL   string    `json:"repo_url"`
+	PushedAt  time.Time `json:"pushed_at"`
 }
 
 type ClusterResponse struct {

@@ -414,7 +414,8 @@ func (c *GitHubClient) RepoHomepage(ctx context.Context, repo string) (string, e
 
 // LastPushInfo holds the repo of the most recent push event by the owner.
 type LastPushInfo struct {
-	Repo string
+	Repo      string
+	PushedAt  time.Time
 }
 
 // LastPush returns the repo of the most recent PushEvent for the owner.
@@ -447,8 +448,9 @@ func (c *GitHubClient) LastPush(ctx context.Context) (LastPushInfo, error) {
 	}
 
 	var events []struct {
-		Type string `json:"type"`
-		Repo struct {
+		Type      string    `json:"type"`
+		CreatedAt time.Time `json:"created_at"`
+		Repo      struct {
 			Name string `json:"name"`
 		} `json:"repo"`
 	}
@@ -462,7 +464,7 @@ func (c *GitHubClient) LastPush(ctx context.Context) (LastPushInfo, error) {
 		}
 		// repo name is "owner/repo" — strip the owner prefix
 		repoName := strings.TrimPrefix(e.Repo.Name, c.owner+"/")
-		return LastPushInfo{Repo: repoName}, nil
+		return LastPushInfo{Repo: repoName, PushedAt: e.CreatedAt}, nil
 	}
 	return LastPushInfo{}, nil
 }
