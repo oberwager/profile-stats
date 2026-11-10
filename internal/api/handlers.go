@@ -105,6 +105,13 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%d B", b)
 }
 
+func runDurationStart(run sources.WorkflowRun) time.Time {
+	if !run.RunStartedAt.IsZero() {
+		return run.RunStartedAt
+	}
+	return run.CreatedAt
+}
+
 func formatDuration(seconds int) string {
 	if seconds >= 60 {
 		return fmt.Sprintf("%dm %ds", seconds/60, seconds%60)
@@ -672,14 +679,14 @@ func (s *Server) fetchPipeline(ctx context.Context) (PipelineResponse, pipelineT
 				lastRunConclusion = run.Conclusion
 				lastRunAt = run.CreatedAt
 				if run.Status == "completed" {
-					lastRunSeconds = int(run.UpdatedAt.Sub(run.CreatedAt).Seconds())
+					lastRunSeconds = int(run.UpdatedAt.Sub(runDurationStart(run)).Seconds())
 				}
 			}
 			if run.Status == "completed" {
 				totalCompleted++
 				if run.Conclusion == "success" {
 					totalSuccessful++
-					dur := int(run.UpdatedAt.Sub(run.CreatedAt).Seconds())
+					dur := int(run.UpdatedAt.Sub(runDurationStart(run)).Seconds())
 					if dur > 0 {
 						totalDeploySeconds += dur
 					}
@@ -786,14 +793,14 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 
 	var (
 		serviceStatuses []ServiceStatus
-		totalUptime90d  float64
+		totalUptime30d  float64
 		totalUptime24h  float64
 		servicesUp      int
 		servicesDown    int
 	)
 
-	// Fetch 90-day uptime for each monitor in parallel via the badge API.
-	uptime90dMap := make(map[int]float64, len(monitors))
+	// Fetch 30-day uptime for each monitor in parallel via the badge API.
+	uptime30dMap := make(map[int]float64, len(monitors))
 	var badgeMu sync.Mutex
 	var badgeWg sync.WaitGroup
 	for _, mon := range monitors {
@@ -801,13 +808,13 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 		badgeWg.Add(1)
 		go func() {
 			defer badgeWg.Done()
-			pct, err := s.uptimeKuma.UptimeBadge(ctx, mon.ID, 2160)
+			pct, err := s.uptimeKuma.UptimeBadge(ctx, mon.ID, 720)
 			if err != nil {
-				slog.Warn("uptime kuma 90d badge", "monitor", mon.ID, "error", err)
+				slog.Warn("uptime kuma 30d badge", "monitor", mon.ID, "error", err)
 				return
 			}
 			badgeMu.Lock()
-			uptime90dMap[mon.ID] = pct
+			uptime30dMap[mon.ID] = pct
 			badgeMu.Unlock()
 		}()
 	}
@@ -816,7 +823,7 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 	for _, mon := range monitors {
 		idStr := strconv.Itoa(mon.ID)
 		uptime24h := heartbeat.UptimeList[idStr+"_24"]
-		uptime90d := uptime90dMap[mon.ID]
+		uptime30d := uptime30dMap[mon.ID]
 
 		up := uptime24h > 0.95
 
@@ -846,7 +853,7 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 			AvgPingMs: avgPingMs,
 		}
 		serviceStatuses = append(serviceStatuses, ss)
-		totalUptime90d += uptime90d
+		totalUptime30d += uptime30d
 		totalUptime24h += uptime24h
 		if up {
 			servicesUp++
@@ -855,9 +862,9 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 		}
 	}
 
-	var uptime90DayPct, uptime24HourPct float64
+	var uptime30DayPct, uptime24HourPct float64
 	if len(serviceStatuses) > 0 {
-		uptime90DayPct = (totalUptime90d / float64(len(serviceStatuses))) * 100
+		uptime30DayPct = (totalUptime30d / float64(len(serviceStatuses))) * 100
 		uptime24HourPct = (totalUptime24h / float64(len(serviceStatuses))) * 100
 	}
 
@@ -866,7 +873,7 @@ func (s *Server) fetchServices(ctx context.Context) ServicesResponse {
 	}
 
 	return ServicesResponse{
-		Uptime90DayPct:  uptime90DayPct,
+		Uptime30DayPct:  uptime30DayPct,
 		Uptime24HourPct: uptime24HourPct,
 		ServicesUp:      servicesUp,
 		ServicesDown:    servicesDown,

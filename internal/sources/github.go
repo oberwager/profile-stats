@@ -56,19 +56,21 @@ func (c *GitHubClient) tokenCacheCleanupLoop() {
 }
 
 type WorkflowRun struct {
-	Conclusion string
-	Status     string
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	Conclusion   string
+	Status       string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	RunStartedAt time.Time
 }
 
 type workflowRunsResponse struct {
 	WorkflowRuns []struct {
-		Conclusion string    `json:"conclusion"`
-		Status     string    `json:"status"`
-		CreatedAt  time.Time `json:"created_at"`
-		UpdatedAt  time.Time `json:"updated_at"`
-		Path       string    `json:"path"`
+		Conclusion   string    `json:"conclusion"`
+		Status       string    `json:"status"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		RunStartedAt time.Time `json:"run_started_at"`
+		Path         string    `json:"path"`
 	} `json:"workflow_runs"`
 }
 
@@ -112,10 +114,11 @@ func (c *GitHubClient) WorkflowRuns(ctx context.Context, repo string) ([]Workflo
 			continue
 		}
 		runs = append(runs, WorkflowRun{
-			Conclusion: r.Conclusion,
-			Status:     r.Status,
-			CreatedAt:  r.CreatedAt,
-			UpdatedAt:  r.UpdatedAt,
+			Conclusion:   r.Conclusion,
+			Status:       r.Status,
+			CreatedAt:    r.CreatedAt,
+			UpdatedAt:    r.UpdatedAt,
+			RunStartedAt: r.RunStartedAt,
 		})
 	}
 

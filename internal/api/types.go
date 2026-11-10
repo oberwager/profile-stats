@@ -59,7 +59,7 @@ type RepoSummary struct {
 }
 
 type ServicesResponse struct {
-	Uptime90DayPct  float64         `json:"uptime_90day_pct"`
+	Uptime30DayPct  float64         `json:"uptime_30day_pct"`
 	Uptime24HourPct float64         `json:"uptime_24hour_pct"`
 	ServicesUp      int             `json:"services_up"`
 	ServicesDown    int             `json:"services_down"`
