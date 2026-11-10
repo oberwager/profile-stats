@@ -105,6 +105,11 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%d B", b)
 }
 
+// runDurationStart returns the timestamp a workflow run's execution actually
+// began from. run_started_at resets whenever a run is re-run, unlike
+// created_at, which stays pinned to the original trigger time; using
+// created_at here would make "re-run jobs" on an old run balloon the
+// measured duration to the age of the original run.
 func runDurationStart(run sources.WorkflowRun) time.Time {
 	if !run.RunStartedAt.IsZero() {
 		return run.RunStartedAt
@@ -656,11 +661,12 @@ func (s *Server) fetchPipeline(ctx context.Context) (PipelineResponse, pipelineT
 	cutoff := now.AddDate(0, 0, -30)
 
 	var (
-		totalDeploySeconds int
-		totalSuccessful    int
-		totalCompleted     int
-		totalDeploys30d    int
-		repos              []RepoSummary
+		totalDeploySeconds     int
+		successfulWithDuration int
+		totalSuccessful        int
+		totalCompleted         int
+		totalDeploys30d        int
+		repos                  []RepoSummary
 	)
 
 	runsMap := make(map[string][]sources.WorkflowRun, len(s.managedRepos))
@@ -675,20 +681,32 @@ func (s *Server) fetchPipeline(ctx context.Context) (PipelineResponse, pipelineT
 		var lastRunSeconds int
 		var lastRunAt time.Time
 		for j, run := range runs {
+			// GitHub's Actions retention policy (effective 2026-10-01) now
+			// sweeps up and purges workflow run data older than the retention
+			// window, and that sweep bumps the run's updated_at even though
+			// nothing about the run's actual execution changed. A run can
+			// never be swept before it's crossed that retention floor, so
+			// restricting duration math to runs created within our existing
+			// 30-day cutoff (same one DeploysLast30Days uses) keeps corrupted
+			// updated_at values out of the average without guessing at a
+			// duration ceiling.
+			dur := int(run.UpdatedAt.Sub(runDurationStart(run)).Seconds())
+			trustedDur := run.CreatedAt.After(cutoff) && dur > 0
+
 			if j == 0 {
 				lastRunConclusion = run.Conclusion
 				lastRunAt = run.CreatedAt
-				if run.Status == "completed" {
-					lastRunSeconds = int(run.UpdatedAt.Sub(runDurationStart(run)).Seconds())
+				if run.Status == "completed" && trustedDur {
+					lastRunSeconds = dur
 				}
 			}
 			if run.Status == "completed" {
 				totalCompleted++
 				if run.Conclusion == "success" {
 					totalSuccessful++
-					dur := int(run.UpdatedAt.Sub(runDurationStart(run)).Seconds())
-					if dur > 0 {
+					if trustedDur {
 						totalDeploySeconds += dur
+						successfulWithDuration++
 					}
 				}
 			}
@@ -715,8 +733,8 @@ func (s *Server) fetchPipeline(ctx context.Context) (PipelineResponse, pipelineT
 	}
 
 	var avgDeploySeconds int
-	if totalSuccessful > 0 {
-		avgDeploySeconds = totalDeploySeconds / totalSuccessful
+	if successfulWithDuration > 0 {
+		avgDeploySeconds = totalDeploySeconds / successfulWithDuration
 	}
 	var successRatePct float64
 	if totalCompleted > 0 {
